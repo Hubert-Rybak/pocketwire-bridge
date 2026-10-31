@@ -1,7 +1,11 @@
 name: release
-# On a version tag (v0.3.0, matching Cargo.toml), builds the Bridge for Linux, Windows and
-# macOS on GitHub's runners, publishes it as a release of this repository with SHA256SUMS and
-# signed build provenance, and updates the Homebrew tap.
+# Builds the Bridge for Linux, Windows and macOS on GitHub's runners, publishes it as a release
+# of this repository with SHA256SUMS and signed build provenance, and updates the Homebrew tap.
+#
+# Start it either way:
+# - push a version tag (v0.3.0, matching the version in Cargo.toml), or
+# - Actions > release > Run workflow on main, with the tag: the workflow creates that tag on
+#   main's latest commit first, so a release needs no computer.
 #
 # The tap step needs the repository secret TAP_TOKEN: a fine-grained token with
 # Contents: read and write on Hubert-Rybak/homebrew-pocketwire. Without it the release is
@@ -12,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to build, e.g. v0.3.0"
+        description: "Version tag, e.g. v0.3.0 (created on this branch's latest commit if it doesn't exist yet)"
         required: true
 permissions:
   contents: read
@@ -25,18 +29,36 @@ env:
 jobs:
   version:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       version: ${{ steps.v.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.TAG }}
+          fetch-depth: 0
       - id: v
+        name: Check the version, and create the tag when started by hand
         run: |
+          echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$' || { echo "bad tag: $TAG"; exit 1; }
           v="${TAG#v}"
-          echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$' || { echo "bad tag: $TAG"; exit 1; }
+          create=no
+          if git rev-parse -q --verify "refs/tags/$TAG^{commit}" >/dev/null; then
+            git checkout -q "$TAG"
+          elif [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            create=yes
+          else
+            echo "tag $TAG not found"; exit 1
+          fi
           c=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           [ "$v" = "$c" ] || { echo "tag $TAG does not match Cargo.toml version $c"; exit 1; }
+          if [ "$create" = yes ]; then
+            git config user.name "Hubert Rybak"
+            git config user.email "h.rybak@gmail.com"
+            git tag -a "$TAG" -m "Pocketwire Bridge $v"
+            git push origin "refs/tags/$TAG"
+            echo "Created tag $TAG on $(git rev-parse --short HEAD)" >> "$GITHUB_STEP_SUMMARY"
+          fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
 
   linux:
