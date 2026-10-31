@@ -147,7 +147,7 @@ mod imp {
     struct Tray(Arc<App>);
 
     fn argb(rgba: &[u8]) -> Vec<u8> {
-        rgba.chunks_exact(4).flat_map(|p| [p[3], p[0], p[1], p[2]]).collect()
+        rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[3], p[0], p[1], p[2]]).collect()
     }
 
     fn item(label: &str, enabled: bool, a: Action) -> MenuItem<Tray> {
