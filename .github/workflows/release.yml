@@ -1,0 +1,238 @@
+name: release
+# On a version tag (v0.3.0, matching Cargo.toml), builds the Bridge for Linux, Windows and
+# macOS on GitHub's runners, publishes it as a release of this repository with SHA256SUMS and
+# signed build provenance, and updates the Homebrew tap.
+#
+# The tap step needs the repository secret TAP_TOKEN: a fine-grained token with
+# Contents: read and write on Hubert-Rybak/homebrew-pocketwire. Without it the release is
+# still published and the tap is left as it is.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build, e.g. v0.3.0"
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  CARGO_TERM_COLOR: always
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - id: v
+        run: |
+          v="${TAG#v}"
+          echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$' || { echo "bad tag: $TAG"; exit 1; }
+          c=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          [ "$v" = "$c" ] || { echo "tag $TAG does not match Cargo.toml version $c"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+  linux:
+    needs: version
+    strategy:
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-musl, arch: amd64 }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, arch: arm64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Rust
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
+          sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build
+        run: |
+          export "CC_$(echo ${{ matrix.target }} | tr - _)=musl-gcc"
+          cargo +stable build --release --locked --target ${{ matrix.target }}
+          mkdir -p dist && cp target/${{ matrix.target }}/release/pocketwire dist/pocketwire-linux-${{ matrix.arch }}
+          ./dist/pocketwire-linux-${{ matrix.arch }} version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-${{ matrix.arch }}
+          path: dist/
+
+  windows:
+    needs: version
+    strategy:
+      matrix:
+        include:
+          - { target: x86_64-pc-windows-msvc, arch: amd64 }
+          - { target: aarch64-pc-windows-msvc, arch: arm64 }
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
+          # ring builds its ARM64 assembly with clang, which comes with the runner's LLVM.
+          echo 'C:\Program Files\LLVM\bin' >> "$GITHUB_PATH"
+      - name: Build
+        run: |
+          mkdir -p dist gui
+          cargo +stable build --release --locked --target ${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/pocketwire.exe dist/pocketwire-windows-${{ matrix.arch }}.exe
+          cp target/${{ matrix.target }}/release/pocketwire.exe gui/pocketwire.exe
+          cargo +stable build --release --locked --target ${{ matrix.target }} --features gui
+          cp target/${{ matrix.target }}/release/pocketwire.exe gui/PocketwireBridge.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-${{ matrix.arch }}
+          path: dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-input-${{ matrix.arch }}
+          path: gui/
+
+  windows-installer:
+    needs: [version, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - run: sudo apt-get update && sudo apt-get install -y nsis
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: installer-input-*
+          path: in
+      - run: |
+          for arch in amd64 arm64; do
+            packaging/windows/build.sh "${{ needs.version.outputs.version }}" "$arch" "in/installer-input-$arch" dist
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-installers
+          path: dist/
+
+  macos:
+    needs: version
+    runs-on: macos-latest
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal --target aarch64-apple-darwin --target x86_64-apple-darwin && rustup default stable
+      - name: Command line builds
+        run: |
+          mkdir -p dist
+          for p in aarch64-apple-darwin:arm64 x86_64-apple-darwin:amd64; do
+            t=${p%:*}; a=${p#*:}
+            cargo build --release --locked --target "$t"
+            cp "target/$t/release/pocketwire" "dist/pocketwire-darwin-$a"
+          done
+          ./dist/pocketwire-darwin-arm64 version
+      - name: Menu bar app
+        run: packaging/macos/build-app.sh "${{ needs.version.outputs.version }}" dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: dist/
+
+  publish:
+    needs: [version, linux, windows, windows-installer, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd dist
+          chmod +x pocketwire-linux-* pocketwire-darwin-*
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/pocketwire-*
+            dist/Pocketwire-Bridge-macos.zip
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          cat > notes.md <<NOTES
+          Pocketwire Bridge $VERSION for macOS, Windows and Linux, built from this tag by the
+          [release workflow](https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID).
+
+          - macOS: \`brew install --cask hubert-rybak/pocketwire/pocketwire-bridge\`, or Pocketwire-Bridge-macos.zip (menu bar app, Apple silicon and Intel)
+          - Windows: pocketwire-setup-windows-amd64.exe or -arm64.exe (installer, no administrator rights)
+          - Linux: pocketwire-linux-amd64 or -arm64 (static), or \`brew install hubert-rybak/pocketwire/pocketwire\` to build from source
+
+          Check a download:
+
+          \`\`\`sh
+          sha256sum --check --ignore-missing SHA256SUMS
+          gh attestation verify pocketwire-linux-amd64 --repo $GITHUB_REPOSITORY
+          \`\`\`
+          NOTES
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "Pocketwire Bridge $VERSION" --notes-file notes.md
+
+  tap:
+    needs: [version, publish]
+    runs-on: ubuntu-latest
+    env:
+      TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+      TAP_REPO: Hubert-Rybak/homebrew-pocketwire
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Tap not configured
+        if: env.TAP_TOKEN == ''
+        run: echo "TAP_TOKEN is not set; the release is published, the Homebrew tap was not updated." >> "$GITHUB_STEP_SUMMARY"
+      - name: Update the cask and the formula
+        if: env.TAP_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern Pocketwire-Bridge-macos.zip --dir in
+          app_sha=$(sha256sum in/Pocketwire-Bridge-macos.zip | cut -d' ' -f1)
+          src_sha=$(curl -fsSL "https://github.com/$GITHUB_REPOSITORY/archive/refs/tags/$TAG.tar.gz" | sha256sum | cut -d' ' -f1)
+          git clone "https://x-access-token:$TAP_TOKEN@github.com/$TAP_REPO.git" tap
+          mkdir -p tap/Casks tap/Formula
+          packaging/homebrew/render.sh cask "$VERSION" "$app_sha" > tap/Casks/pocketwire-bridge.rb
+          packaging/homebrew/render.sh formula "$VERSION" "$src_sha" > tap/Formula/pocketwire.rb
+          cd tap
+          git config user.name "Hubert Rybak"
+          git config user.email "h.rybak@gmail.com"
+          git add Casks/pocketwire-bridge.rb Formula/pocketwire.rb
+          git diff --cached --quiet && { echo "tap already up to date"; exit 0; }
+          git commit -m "pocketwire-bridge $VERSION"
+          git push origin HEAD

@@ -1,0 +1,61 @@
+[package]
+name = "pocketwire-bridge"
+version = "0.3.0"
+edition = "2021"
+rust-version = "1.89"
+license = "Apache-2.0"
+description = "Pocketwire Bridge: lets AI apps send texts from your own phone, with your approval"
+homepage = "https://pocketwire.app/"
+repository = "https://github.com/Hubert-Rybak/pocketwire-bridge"
+publish = false
+
+[[bin]]
+name = "pocketwire"
+path = "src/main.rs"
+
+[features]
+default = ["tray"]
+# Windowless build (PocketwireBridge.exe, the binary in the macOS app bundle): starting it
+# without arguments opens the background app instead of printing the usage.
+gui = []
+# Tray icon (Windows, macOS menu bar, Linux StatusNotifier).
+tray = ["dep:tray-icon", "dep:tao", "dep:ksni"]
+
+[dependencies]
+tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "sync", "macros", "process", "io-util", "io-std", "signal"] }
+hyper = { version = "1", default-features = false, features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+tokio-tungstenite = { version = "0.27", default-features = false, features = ["handshake"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls-native-certs = "0.8"
+webpki-roots = "1"
+ring = "0.17"
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "crypto"] }
+instant-acme = { version = "0.8", default-features = false, features = ["ring"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+qrcodegen = "1.8"
+tokio-util = { version = "0.7", default-features = false }
+http = "1"
+
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+tray-icon = { version = "0.21", optional = true, default-features = false }
+tao = { version = "0.34", optional = true, default-features = false }
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+ksni = { version = "0.3", optional = true, default-features = false, features = ["tokio"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = ["Win32_System_Console", "Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_Registry", "Win32_Security"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
