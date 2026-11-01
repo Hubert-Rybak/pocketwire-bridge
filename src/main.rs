@@ -8,16 +8,12 @@ mod autostart;
 mod bridge;
 mod client;
 mod config;
-mod der;
 mod desktop;
 mod driver;
-mod local;
 mod log;
 mod net;
 mod protocol;
-mod relay;
 mod service;
-mod stdio;
 mod util;
 mod web;
 #[cfg(windows)]
@@ -29,10 +25,12 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::time::Duration;
 
-use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 const DEFAULT_SERVER: &str = "https://pocketwire.app";
+
+/// The connector address for every AI app; the server queues texts and sends them to the Bridge.
+const MCP_URL: &str = "https://pocketwire.app/mcp";
 
 /// Whether this is the windowless build (PocketwireBridge.exe, the binary in the macOS app bundle).
 const GUI_BUILD: bool = cfg!(feature = "gui");
@@ -45,11 +43,9 @@ or an Android phone through KDE Connect on any computer.
 
 Usage:
   pocketwire pair <CODE> [--server URL] [--name NAME] [--driver NAME] [--kdeconnect-device ID] [--messages-service sms|imessage]
-  pocketwire run [--local-port N] [--no-open]
+  pocketwire run                          keep this computer connected and deliver texts
   pocketwire app [--background]           run in the background with a tray icon and a control page
-  pocketwire connect                      how to connect Claude Desktop, Claude Code or Cursor privately
-  pocketwire mcp                          private MCP over stdio, for AI apps on this computer
-  pocketwire approvals                    open the page with messages waiting for your approval
+  pocketwire connect                      how to connect an AI app
   pocketwire doctor
   pocketwire test-send <+E164> <text>     send one message through the driver locally (asks first)
   pocketwire service install|uninstall     start at sign-in (Windows: the tray app; macOS and Linux: a service)
@@ -61,9 +57,10 @@ Drivers: {}
   kdeconnect      KDE Connect with a paired Android phone; default on Windows and Linux, works on macOS too
   dry-run         prints messages instead of sending; for trying things out
 
-Private mode: AI apps on this computer can connect to the Bridge directly (see
-`pocketwire connect`). Then the number and the text stay on this computer; the server
-only sees a keyed tag of the number and the length, to apply your limits and approval mode.
+AI apps connect to {MCP_URL}. The Pocketwire server keeps their
+texts, queues them while this computer or the phone is offline and sends them to
+this Bridge, which delivers them. Approvals, history and limits are in the
+dashboard at {DEFAULT_SERVER}/app.
 
 Get a pairing code at {DEFAULT_SERVER}/app/devices.
 "#,
@@ -103,15 +100,13 @@ fn main() {
         }
         "_installer" => installer(&rest),
         "app" => cmd_app(&rest, quiet),
-        "pair" | "run" | "connect" | "mcp" | "approvals" | "doctor" | "test-send" | "service" | "unpair" => block_on(async move {
+        "pair" | "run" | "connect" | "doctor" | "test-send" | "service" | "unpair" => block_on(async move {
             let stop = CancellationToken::new();
             tokio::spawn(on_signal(stop.clone()));
             match cmd.as_str() {
                 "pair" => cmd_pair(&rest).await,
                 "run" => cmd_run(&rest, stop).await,
                 "connect" => cmd_connect(),
-                "mcp" => cmd_mcp(stop).await,
-                "approvals" => cmd_approvals(),
                 "doctor" => cmd_doctor().await,
                 "test-send" => cmd_test_send(&rest).await,
                 "service" => cmd_service(&rest).await,
@@ -267,64 +262,32 @@ async fn cmd_pair(args: &[String]) -> Result<(), String> {
 }
 
 async fn cmd_run(args: &[String], stop: CancellationToken) -> Result<(), String> {
-    let f = parse_flags(args, &["local-port"], &["no-open", "no-relay"])?;
-    let port: u16 = match f.value("local-port") {
-        Some(v) => v.parse().map_err(|_| format!("invalid value {} for flag -local-port", log::quote(v)))?,
-        None => 0,
-    };
-    let (mut c, path) = bridge::load_local()?;
-    if port != 0 || f.on("no-open") {
-        if port != 0 {
-            c.local_port = port;
-        }
-        if f.on("no-open") {
-            c.no_open_approvals = true;
-        }
-        config::save(&path, &c)?;
+    let f = parse_flags(args, &[], &[])?;
+    if let Some(a) = f.rest.first() {
+        return Err(format!("unexpected argument {} (usage: pocketwire run)", log::quote(a)));
     }
-    let run = bridge::start(&c, &path, f.on("no-relay"), stop).await?;
+    let (c, _) = bridge::load_paired()?;
+    let run = bridge::start(&c, stop).await?;
     run.done.await.unwrap_or(Ok(()))
 }
 
 fn cmd_connect() -> Result<(), String> {
-    let (c, _) = bridge::load_local()?;
-    let exe = autostart::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| "pocketwire".into());
-    let cfg = serde_json::to_string_pretty(&json!({"mcpServers": {"pocketwire": {"command": exe, "args": ["mcp"]}}})).unwrap_or_default();
-    let url = format!("http://127.0.0.1:{}/mcp", c.local_port);
-    let t = &c.local_token;
+    let server = env_or("POCKETWIRE_SERVER", DEFAULT_SERVER);
+    let server = server.trim_end_matches('/');
     print!(
-        r#"Private mode: connect an AI app on this computer straight to the Bridge. The number and
-the text then stay on this computer. Keep the Bridge running (pocketwire run, or the service).
+        r#"Every AI app connects to the same address:
 
-Claude Desktop, Cursor and other apps that start local servers: add this to their MCP config
-(Claude Desktop: Settings > Developer > Edit Config):
+  {server}/mcp
 
-{cfg}
+Add it in the app as a custom connector (a remote MCP server); the app asks you to sign in
+to Pocketwire once. There is nothing to set up on this computer besides pairing it.
 
-Claude Code:
-
-  claude mcp add --transport http pocketwire {url} --header "Authorization: Bearer {t}"
-
-Any app that takes a URL and a header: {url} with "Authorization: Bearer {t}".
-Keep the token private; anyone with it can send texts from this computer.
+The Pocketwire server keeps the texts the app sends, queues them while this computer or your
+phone is offline (for up to 24 hours) and sends them to this Bridge, which delivers them.
+Approvals: {server}/app/approvals
 "#
     );
     Ok(())
-}
-
-async fn cmd_mcp(stop: CancellationToken) -> Result<(), String> {
-    let (c, _) = bridge::load_local()?;
-    tokio::select! {
-        r = stdio::run(c.local_port, c.local_token.clone()) => r,
-        _ = stop.cancelled() => Ok(()),
-    }
-}
-
-fn cmd_approvals() -> Result<(), String> {
-    let (c, _) = bridge::load_local()?;
-    let url = local::localweb::approval_url(c.local_port, &c.local_token);
-    println!("{url}");
-    local::localweb::open_browser(&url)
 }
 
 async fn cmd_doctor() -> Result<(), String> {

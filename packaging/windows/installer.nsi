@@ -1,6 +1,6 @@
 ; Pocketwire Bridge installer for Windows. Per-user: no administrator rights, installs to
 ; %LocalAppData%\Programs\Pocketwire. Build with build.sh (makensis runs on Linux too).
-;   makensis -DVERSION=0.3.0 -DARCH=amd64 -DSRC=<dir with both exes> -DOUT=<setup.exe> installer.nsi
+;   makensis -DVERSION=0.4.0 -DARCH=amd64 -DSRC=<dir with both exes> -DOUT=<setup.exe> installer.nsi
 
 Unicode true
 !include "MUI2.nsh"

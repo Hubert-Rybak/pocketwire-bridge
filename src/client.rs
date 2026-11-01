@@ -1,26 +1,24 @@
 //! Pairing with Pocketwire and the device connection: authenticate, run commands, reconnect.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
-use crate::driver::{BoxFuture, Driver};
+use crate::driver::Driver;
 use crate::logf;
 use crate::net;
 use crate::protocol::{self, DeviceKey, Frame};
 
-/// Relayed sends from the cloud, and private sends from the local MCP endpoint (the server never
-/// sees their number or text).
-pub const CAPABILITIES: [&str; 2] = ["sms.send", "sms.private"];
+/// The Bridge delivers the texts the Pocketwire server sends it as `sms.send` commands.
+pub const CAPABILITIES: [&str; 1] = ["sms.send"];
 
-pub const OFFLINE: &str = "the Bridge is not connected to Pocketwire right now";
 pub const REVOKED: &str = "this device was removed from your Pocketwire account; pair it again";
 
 /// The platform names the server accepts.
@@ -72,15 +70,6 @@ pub fn backoff(n: u32) -> Duration {
     Duration::from_secs_f64(base * jitter)
 }
 
-/// What the local engine needs from the connection.
-pub trait Upstream: Send + Sync {
-    fn connected(&self) -> bool;
-    /// Asks the server whether a private message may go out (only tag, length and segments leave).
-    fn decide(&self, f: Frame) -> BoxFuture<Result<Frame, String>>;
-    /// Sends a status update; while offline it is kept and sent after reconnecting.
-    fn report(&self, message_id: &str, status: &str, error: &str);
-}
-
 /// Remembers the last n command ids.
 struct Seen {
     n: usize,
@@ -105,12 +94,8 @@ impl Seen {
 
 struct State {
     send: Option<mpsc::UnboundedSender<Frame>>,
-    waiting: HashMap<String, oneshot::Sender<Frame>>,
-    outbox: VecDeque<Frame>,
     seen: Seen,
 }
-
-type TrustedHook = Box<dyn Fn(Vec<String>) + Send + Sync>;
 
 /// Keeps a connection open, runs commands and reconnects with backoff.
 pub struct Runner {
@@ -118,7 +103,6 @@ pub struct Runner {
     pub device_id: String,
     key: Arc<DeviceKey>,
     pub driver: Driver,
-    on_trusted: Mutex<Option<TrustedHook>>,
     st: Mutex<State>,
 }
 
@@ -129,19 +113,8 @@ impl Runner {
             device_id: device_id.to_string(),
             key,
             driver,
-            on_trusted: Mutex::new(None),
-            st: Mutex::new(State {
-                send: None,
-                waiting: HashMap::new(),
-                outbox: VecDeque::new(),
-                seen: Seen { n: 500, order: VecDeque::new(), set: HashSet::new() },
-            }),
+            st: Mutex::new(State { send: None, seen: Seen { n: 500, order: VecDeque::new(), set: HashSet::new() } }),
         })
-    }
-
-    /// Receives the account's trusted numbers whenever the server sends them.
-    pub fn on_trusted(&self, f: impl Fn(Vec<String>) + Send + Sync + 'static) {
-        *self.on_trusted.lock().unwrap() = Some(Box::new(f));
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -152,46 +125,8 @@ impl Runner {
         self.lock().send.is_some()
     }
 
-    /// Asks whether a bearer token (sent as its SHA-256) is valid for this Bridge.
-    pub async fn introspect(&self, token_hash: &str) -> Result<Frame, String> {
-        let mut f = Frame::new("introspect");
-        f.request_id = crate::util::random_hex(12);
-        f.token_hash = token_hash.to_string();
-        self.request(f).await
-    }
-
-    /// Sends a frame with a request_id and waits for the answer carrying the same id.
-    async fn request(&self, f: Frame) -> Result<Frame, String> {
-        let (tx, rx) = oneshot::channel();
-        let id = f.request_id.clone();
-        {
-            let mut st = self.lock();
-            let Some(send) = st.send.clone() else { return Err(OFFLINE.into()) };
-            st.waiting.insert(id.clone(), tx);
-            if send.send(f).is_err() {
-                st.waiting.remove(&id);
-                return Err(OFFLINE.into());
-            }
-        }
-        let out = tokio::time::timeout(Duration::from_secs(15), rx).await;
-        self.lock().waiting.remove(&id);
-        match out {
-            Ok(Ok(f)) => Ok(f),
-            Ok(Err(_)) => Err(OFFLINE.into()),
-            Err(_) => Err("the server did not answer in time".into()),
-        }
-    }
-
     fn set_send(&self, send: Option<mpsc::UnboundedSender<Frame>>) {
-        let mut st = self.lock();
-        if let Some(s) = &send {
-            for f in st.outbox.drain(..).collect::<Vec<_>>() {
-                let _ = s.send(f);
-            }
-        } else {
-            st.waiting.clear();
-        }
-        st.send = send;
+        self.lock().send = send;
     }
 
     /// Runs until `stop` fires (Ok) or the device is revoked (Err(REVOKED)).
@@ -293,16 +228,6 @@ impl Runner {
                     self.set_send(Some(tx.clone()));
                     logf!("connected to {} as {} (driver {})", self.server, self.device_id, self.driver.name());
                 }
-                "trusted" => {
-                    if let Some(cb) = self.on_trusted.lock().unwrap().as_ref() {
-                        cb(f.numbers);
-                    }
-                }
-                "send_decision" | "introspection" => {
-                    if let Some(w) = self.lock().waiting.remove(&f.request_id) {
-                        let _ = w.send(f);
-                    }
-                }
                 "ping" => {
                     let _ = tx.send(Frame::new("pong"));
                 }
@@ -372,54 +297,6 @@ impl Runner {
     }
 }
 
-impl Upstream for Runner {
-    fn connected(&self) -> bool {
-        self.is_connected()
-    }
-
-    fn decide(&self, mut f: Frame) -> BoxFuture<Result<Frame, String>> {
-        f.typ = "send_request".into();
-        // The future must not borrow self; take what it needs.
-        let (tx, rx) = oneshot::channel();
-        let id = f.request_id.clone();
-        let sent = {
-            let mut st = self.lock();
-            match st.send.clone() {
-                Some(send) => {
-                    st.waiting.insert(id.clone(), tx);
-                    send.send(f).is_ok()
-                }
-                None => false,
-            }
-        };
-        Box::pin(async move {
-            if !sent {
-                return Err(OFFLINE.to_string());
-            }
-            match tokio::time::timeout(Duration::from_secs(15), rx).await {
-                Ok(Ok(f)) => Ok(f),
-                Ok(Err(_)) => Err(OFFLINE.to_string()),
-                Err(_) => Err("the server did not answer in time".to_string()),
-            }
-        })
-    }
-
-    fn report(&self, message_id: &str, status: &str, error: &str) {
-        let mut f = Frame::new("status");
-        f.id = message_id.to_string();
-        f.status = status.to_string();
-        f.error = error.to_string();
-        let mut st = self.lock();
-        let sent = st.send.as_ref().map(|s| s.send(f.clone()).is_ok()).unwrap_or(false);
-        if !sent {
-            st.outbox.push_back(f);
-            if st.outbox.len() > 500 {
-                st.outbox.pop_front();
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -437,5 +314,37 @@ mod tests {
         let mut s = Seen { n: 2, order: VecDeque::new(), set: HashSet::new() };
         assert!(s.add("a") && s.add("b") && !s.add("a"));
         assert!(s.add("c") && s.add("a"));
+    }
+
+    fn command(id: &str, command: &str, to: &str) -> Frame {
+        let mut f = Frame::new("command");
+        f.id = id.into();
+        f.command = command.into();
+        f.params = Some(protocol::CommandParams { to: to.into(), body: "hi".into() });
+        f
+    }
+
+    async fn frames(r: &Runner, f: Frame) -> Vec<(String, String, String)> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        r.handle(f, tx).await;
+        let mut out = Vec::new();
+        while let Ok(f) = rx.try_recv() {
+            out.push((f.typ, f.status, f.error));
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn delivers_sms_send_commands_once() {
+        assert_eq!(CAPABILITIES, ["sms.send"]);
+        let d = Driver::new("dry-run", &Default::default(), None).unwrap();
+        let r = Runner::new("https://pocketwire.app", "dev_1", Arc::new(DeviceKey::generate().unwrap()), d);
+        let s = |t: &str, st: &str, e: &str| (t.to_string(), st.to_string(), e.to_string());
+        let sent = vec![s("ack", "", ""), s("status", "sending", ""), s("status", "sent", "")];
+        assert_eq!(frames(&r, command("cmd_1", "sms.send", "+48501234567")).await, sent);
+        // A repeated command is acknowledged but not sent again.
+        assert_eq!(frames(&r, command("cmd_1", "sms.send", "+48501234567")).await, vec![s("ack", "", "")]);
+        assert_eq!(frames(&r, command("cmd_2", "sms.private", "+48501234567")).await, vec![s("ack", "", ""), s("status", "failed", "unsupported_command")]);
+        assert_eq!(frames(&r, command("cmd_3", "sms.send", "501234567")).await, vec![s("ack", "", ""), s("status", "failed", "invalid_params")]);
     }
 }

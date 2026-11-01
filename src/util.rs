@@ -1,4 +1,4 @@
-//! Small helpers: randomness, hex, time stamps, HTML and URL encoding.
+//! Small helpers: randomness, hex, time stamps, HTML and URL encoding, opening a browser.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -23,17 +23,6 @@ pub fn hex(b: &[u8]) -> String {
         s.push(D[(x & 15) as usize] as char);
     }
     s
-}
-
-pub fn unhex(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok()).collect()
-}
-
-pub fn sha256_hex(data: &[u8]) -> String {
-    hex(ring::digest::digest(&ring::digest::SHA256, data).as_ref())
 }
 
 pub fn hmac_hex(key: &[u8], msg: &[u8]) -> String {
@@ -63,16 +52,6 @@ pub fn now_secs() -> i64 {
     now_ms().div_euclid(1000)
 }
 
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = (m + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe - 719468
-}
-
 fn civil_from_days(z: i64) -> (i64, i64, i64) {
     let z = z + 719468;
     let era = z.div_euclid(146097);
@@ -96,53 +75,6 @@ pub fn rfc3339(ms: i64, millis: bool) -> String {
     } else {
         base + "Z"
     }
-}
-
-/// Time of day (HH:MM:SS, UTC) for pages; a script on the page shows it in local time.
-pub fn clock(ms: i64) -> String {
-    rfc3339(ms, false)[11..19].to_string()
-}
-
-/// Parses RFC 3339 (any offset, any number of decimals) into milliseconds.
-pub fn parse_rfc3339(s: &str) -> Option<i64> {
-    let b = s.as_bytes();
-    if b.len() < 20 || b[4] != b'-' || b[7] != b'-' || !(b[10] == b'T' || b[10] == b't' || b[10] == b' ') || b[13] != b':' || b[16] != b':' {
-        return None;
-    }
-    let num = |r: std::ops::Range<usize>| s.get(r)?.parse::<i64>().ok();
-    let (y, mo, d, h, mi, se) = (num(0..4)?, num(5..7)?, num(8..10)?, num(11..13)?, num(14..16)?, num(17..19)?);
-    let mut i = 19;
-    let mut frac_ms = 0i64;
-    if b.get(i) == Some(&b'.') {
-        i += 1;
-        let start = i;
-        while i < b.len() && b[i].is_ascii_digit() {
-            i += 1;
-        }
-        let digits = &s[start..i];
-        let mut v = 0i64;
-        for (k, c) in digits.chars().take(3).enumerate() {
-            v += (c as i64 - '0' as i64) * [100, 10, 1][k];
-        }
-        frac_ms = v;
-    }
-    let offset_secs = match b.get(i)? {
-        b'Z' | b'z' => 0,
-        sign @ (b'+' | b'-') => {
-            let oh = num(i + 1..i + 3)?;
-            let om = num(i + 4..i + 6)?;
-            let o = oh * 3600 + om * 60;
-            if *sign == b'+' {
-                o
-            } else {
-                -o
-            }
-        }
-        _ => return None,
-    };
-    let days = days_from_civil(y, mo, d);
-    let secs = days * 86400 + h * 3600 + mi * 60 + se - offset_secs;
-    Some(secs * 1000 + frac_ms)
 }
 
 /// Escapes text for HTML element content and quoted attribute values.
@@ -223,18 +155,39 @@ pub fn truncate(s: &str, n: usize) -> String {
     s[..end].to_string()
 }
 
+/// Opens a URL with the desktop's default browser.
+pub fn open_browser(url: &str) -> Result<(), String> {
+    let mut cmd = if cfg!(target_os = "macos") {
+        let mut c = std::process::Command::new("open");
+        c.arg(url);
+        c
+    } else if cfg!(windows) {
+        let mut c = std::process::Command::new("rundll32");
+        c.arg("url.dll,FileProtocolHandler").arg(url);
+        c
+    } else {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(url);
+        c
+    };
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn time_roundtrip() {
-        let ms = parse_rfc3339("2026-10-31T11:00:01.123456789+01:00").unwrap();
-        assert_eq!(rfc3339(ms, true), "2026-10-31T10:00:01.123Z");
-        assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
+    fn formats_times() {
+        assert_eq!(rfc3339(1_793_440_801_123, true), "2026-10-31T10:00:01.123Z");
         assert_eq!(rfc3339(0, false), "1970-01-01T00:00:00Z");
-        assert_eq!(parse_rfc3339("2000-02-29T23:59:59-05:30").map(|v| rfc3339(v, false)), Some("2000-03-01T05:29:59Z".into()));
-        assert_eq!(parse_rfc3339("nope"), None);
+        assert_eq!(rfc3339(951_868_799_000, false), "2000-02-29T23:59:59Z");
     }
 
     #[test]
@@ -246,9 +199,8 @@ mod tests {
     }
 
     #[test]
-    fn hex_roundtrip() {
-        assert_eq!(unhex(&hex(&[0, 1, 254, 255])), Some(vec![0, 1, 254, 255]));
-        assert_eq!(unhex("zz"), None);
+    fn hex_and_truncate() {
+        assert_eq!(hex(&[0, 1, 254, 255]), "0001feff");
         assert_eq!(truncate("ąę", 3), "ą");
     }
 }

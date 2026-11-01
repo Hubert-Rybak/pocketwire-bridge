@@ -28,7 +28,7 @@ cask "pocketwire-bridge" do
               "~/Library/LaunchAgents/app.pocketwire.bridge.plist",
             ]
 
-  # Pairing, private messages and certificates; removed only with `brew uninstall --zap`.
+  # Pairing, the control page's key and the log; removed only with `brew uninstall --zap`.
   zap trash: "~/Library/Application Support/pocketwire"
 
   caveats <<~EOS

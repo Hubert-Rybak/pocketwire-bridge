@@ -3,7 +3,7 @@ name: release
 # of this repository with SHA256SUMS and signed build provenance, and updates the Homebrew tap.
 #
 # Start it either way:
-# - push a version tag (v0.3.0, matching the version in Cargo.toml), or
+# - push a version tag (v0.4.0, matching the version in Cargo.toml), or
 # - Actions > release > Run workflow on main, with the tag: the workflow creates that tag on
 #   main's latest commit first, so a release needs no computer.
 #
@@ -21,7 +21,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Version tag, e.g. v0.3.0 (created on this branch's latest commit if it doesn't exist yet)"
+        description: "Version tag, e.g. v0.4.0 (created on this branch's latest commit if it doesn't exist yet)"
         required: true
 permissions:
   contents: read

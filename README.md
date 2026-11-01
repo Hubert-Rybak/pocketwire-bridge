@@ -5,7 +5,7 @@ The desktop half of [Pocketwire](https://pocketwire.app/): a small program for *
 This repository is the whole Bridge, under the Apache 2.0 license. Every release is built from a tag by this repository's [release workflow](.github/workflows/release.yml) on GitHub's runners, with checksums and signed build provenance, so you can check that the program you run is the code you can read here.
 
 - One binary of about 4 MB with no runtime to install. It uses about 4 MB of memory while connected.
-- It talks to `pocketwire.app` only, over TLS: one WebSocket for commands and one for the private address (see [Network](#network)).
+- It talks to `pocketwire.app` only, over TLS: one WebSocket that receives the texts to send and reports what happened to them (see [Network](#network)).
 - It keeps its files in one folder (see [Files](#files)) and never runs a shell: messages reach Messages or KDE Connect as program arguments.
 
 ## Install
@@ -61,11 +61,9 @@ The `gui` feature only changes what happens when the program starts with no argu
 
 ```
 pocketwire pair <CODE> [--server URL] [--name NAME] [--driver NAME] [--kdeconnect-device ID] [--messages-service sms|imessage]
-pocketwire run [--local-port N] [--no-open] [--no-relay]
+pocketwire run                          keep this computer connected and deliver texts
 pocketwire app [--background]           background app with a tray icon and a control page
-pocketwire connect                      how to connect AI apps on this computer privately
-pocketwire mcp                          private MCP over stdio, for AI apps on this computer
-pocketwire approvals                    open the page with messages waiting for your approval
+pocketwire connect                      how to connect an AI app
 pocketwire doctor
 pocketwire test-send <+E164> <text>     send one message through the driver (asks first)
 pocketwire service install|uninstall    start at sign-in (Windows: the tray app; macOS and Linux: a service)
@@ -81,23 +79,26 @@ pocketwire version
 | `kdeconnect` | Windows and Linux (default), macOS | KDE Connect paired with your Android phone, with the SMS permission granted in the KDE Connect app on the phone. `--kdeconnect-device <id>` picks a phone (`kdeconnect-cli -l`). |
 | `dry-run` | all | Nothing: it prints messages instead of sending them. |
 
-## Private mode
+## How texts are sent
 
-AI apps on the same computer can talk to the Bridge directly, on `http://127.0.0.1:47300/mcp` with the bearer token from the config (`pocketwire connect` prints the setup). Then the number and the text never reach the Pocketwire server: it gets a keyed tag of the number (HMAC with a key that stays in the config), the length and the segment count, so it can still apply your limits, the new recipient rule and the approval mode. When a message needs your OK, the Bridge opens `http://127.0.0.1:47300/approvals`. Scan the QR code there once to approve from your phone too.
+Every AI app connects to one address, `https://pocketwire.app/mcp`, as a custom connector (a remote MCP server), and signs in to your Pocketwire account. Nothing about AI apps is set up on this computer; `pocketwire connect` prints the address.
 
-AI apps in the cloud reach the Bridge at its private address, `https://<label>.b.pocketwire.app/mcp`. Pocketwire's relay forwards those connections by the TLS server name without decrypting them: TLS ends on this computer, with a Let's Encrypt certificate whose key is created here and never leaves the `certs` folder. Sign-in still goes through Pocketwire's OAuth, and the Bridge checks each token by its hash. `--no-relay` turns the private address off.
+1. The AI app asks Pocketwire to send a text. The Pocketwire server receives and stores the recipient's number and the message text, encrypted at rest with a key the server holds, and applies your limits and approval mode. Messages that need your OK wait under [Approvals](https://pocketwire.app/app/approvals) in the dashboard.
+2. The server sends the text to this Bridge over its device connection, as a command. While this computer or the phone is offline, it keeps the text queued, for up to 24 hours.
+3. The Bridge hands the text to Messages or KDE Connect and reports back whether it was sent. The dashboard shows the history.
 
-For development, `POCKETWIRE_SERVER` points at another server, `POCKETWIRE_RELAY_CERT` and `POCKETWIRE_RELAY_KEY` use a fixed certificate, and `POCKETWIRE_ACME_DIRECTORY` uses another ACME directory, such as Let's Encrypt staging.
+The Bridge only delivers: it keeps no message store and has no approval page of its own. Because the server holds the encryption key, the Pocketwire server can read the numbers and texts it stores. The device's private key and the pairing stay on this computer.
+
+For development, `POCKETWIRE_SERVER` points the Bridge at another server.
 
 ## Network
 
 | Connection | What goes over it |
 |---|---|
-| `wss://pocketwire.app/v1/device/ws` | The device connection. The Bridge proves it holds its key by signing a challenge (ECDSA P-256), then receives commands and reports their status. |
-| `wss://pocketwire.app/v1/device/tunnel` | The blind relay: encrypted bytes of connections to the private address, signed in the same way. |
+| `wss://pocketwire.app/v1/device/ws` | The device connection. The Bridge proves it holds its key by signing a challenge (ECDSA P-256), then receives the texts to send (number and text) and reports their status. |
 | `https://pocketwire.app/v1/device/pair` | Pairing, once: the public key and the computer's name. |
-| Let's Encrypt (`acme-v02.api.letsencrypt.org`) | Getting and renewing the certificate for the private address. |
-| `127.0.0.1:47300` and `127.0.0.1:47301` | The private MCP endpoint with the approval page, and the control page. Both accept loopback host names only. |
+| `127.0.0.1:47300` | Answers `/healthz` only, so that a second copy of the Bridge on this computer (the background app, `pocketwire run` or the service) sees that one already runs. |
+| `127.0.0.1:47301` | The background app's control page, for pairing and status. It accepts loopback host names only. |
 
 A proxy from `HTTPS_PROXY` (and `NO_PROXY`) is used when set. The Bridge trusts the operating system's certificate store as well as the Mozilla roots.
 
@@ -107,14 +108,11 @@ The config folder is `~/.config/pocketwire` on Linux, `~/Library/Application Sup
 
 | File | Contents |
 |---|---|
-| `config.json` | Server, device id, the device's private key, the driver, the private endpoint's token and the tag key. |
-| `messages.json` | The last 200 private messages, for status and approvals. |
-| `phones.json` | Hashes of the tokens of phones paired for approvals; delete it to unpair them all. |
-| `certs/` | The private address's certificate and key, and the Let's Encrypt account key. |
+| `config.json` | Server, device id, the device's private key and the driver. |
 | `panel.key` | The key of the control page. |
 | `bridge.log` | The background app's log, started over after 5 MB. |
 
-Pairing files from earlier versions of the Bridge keep working, so upgrading needs no new code.
+Pairing files from earlier versions of the Bridge keep working, so upgrading needs no new code. Settings that 0.3 kept in `config.json` for its private local endpoint are ignored. Version 0.3 also left `messages.json` (its recent private messages, with numbers and texts), `phones.json` and a `certs/` folder in this folder; 0.4 doesn't use them, and you can delete them.
 
 ## License
 

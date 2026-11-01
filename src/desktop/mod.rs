@@ -1,6 +1,6 @@
 //! The Bridge's background app: a tray icon (the menu bar on a Mac) and a small control page on
 //! 127.0.0.1, where the user pairs the computer, sees whether the Bridge is connected and turns
-//! starting at sign-in on or off.
+//! starting at sign-in on or off. Approvals and message history live in the dashboard.
 
 pub mod panel;
 #[cfg(feature = "tray")]
@@ -18,8 +18,8 @@ use crate::bridge::{self, Running};
 use crate::client::{self, Runner};
 use crate::config::{self, LoadError};
 use crate::driver::Driver;
-use crate::local::localweb::{open_browser, Hostname};
 use crate::logf;
+use crate::util::open_browser;
 
 /// Where the control page listens on 127.0.0.1. It also keeps a second copy of the app from
 /// starting: the second copy opens the first one's page and exits.
@@ -51,9 +51,6 @@ impl State {
 
 struct Run {
     runner: Arc<Runner>,
-    approval_url: String,
-    hostname: Hostname,
-    relay: bool,
     driver: Driver,
     stop: CancellationToken,
     id: u64,
@@ -72,8 +69,6 @@ struct St {
 pub struct Snapshot {
     pub state: State,
     pub detail: String,
-    pub approval_url: String,
-    pub private_url: String,
     pub driver_name: String,
     pub driver_err: Option<String>,
     pub autostart: bool,
@@ -145,24 +140,21 @@ impl App {
         format!("http://127.0.0.1:{PANEL_PORT}/?k={}", self.key)
     }
 
+    /// A page of the dashboard, such as "/approvals" or "/devices" ("" for its start page).
+    pub fn dashboard_url(&self, page: &str) -> String {
+        format!("{}/app{page}", self.server.trim_end_matches('/'))
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, St> {
         self.st.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     pub fn snapshot(&self) -> Snapshot {
         let st = self.lock();
-        let (approval_url, private_url, driver_name) = match &st.run {
-            Some(r) => {
-                let h = r.hostname.lock().unwrap().clone();
-                (r.approval_url.clone(), if h.is_empty() || !r.relay { String::new() } else { format!("https://{h}") }, r.driver.name().to_string())
-            }
-            None => (String::new(), String::new(), String::new()),
-        };
+        let driver_name = st.run.as_ref().map(|r| r.driver.name().to_string()).unwrap_or_default();
         Snapshot {
             state: st.state,
             detail: st.detail.clone(),
-            approval_url,
-            private_url,
             driver_name,
             driver_err: st.driver_err.clone(),
             autostart: crate::autostart::enabled(),
@@ -264,17 +256,9 @@ impl App {
         self.lock().driver_err = err;
     }
 
-    /// The private endpoint's port from the config (the Bridge's own lock).
-    fn local_port(&self) -> u16 {
-        match config::load(&self.config_path) {
-            Ok(c) if c.local_port != 0 => c.local_port,
-            _ => config::DEFAULT_LOCAL_PORT,
-        }
-    }
-
-    /// Whether a Bridge outside this app already answers on the local port.
+    /// Whether a Bridge outside this app already answers on its marker port.
     async fn other_bridge(&self) -> bool {
-        let url = format!("http://127.0.0.1:{}/healthz", self.local_port());
+        let url = format!("http://127.0.0.1:{}/healthz", bridge::LOCK_PORT);
         matches!(tokio::time::timeout(Duration::from_secs(1), crate::net::request("GET", &url, &[], Default::default(), 4096)).await, Ok(Ok(r)) if r.status == 200)
     }
 
@@ -295,8 +279,8 @@ impl App {
         }
         self.set(State::Starting, "");
         let stop = self.quit.child_token();
-        let started = match bridge::load_local() {
-            Ok((c, path)) => bridge::start(&c, &path, false, stop.clone()).await,
+        let started = match bridge::load_paired() {
+            Ok((c, _)) => bridge::start(&c, stop.clone()).await,
             Err(e) => Err(e),
         };
         let r: Running = match started {
@@ -311,15 +295,7 @@ impl App {
             let mut g = self.lock();
             g.next_id += 1;
             let id = g.next_id;
-            g.run = Some(Run {
-                runner: r.runner.clone(),
-                approval_url: r.approval_url.clone(),
-                hostname: r.hostname.clone(),
-                relay: r.relay,
-                driver: r.driver.clone(),
-                stop: stop.clone(),
-                id,
-            });
+            g.run = Some(Run { runner: r.runner.clone(), driver: r.driver.clone(), stop: stop.clone(), id });
             id
         };
         {

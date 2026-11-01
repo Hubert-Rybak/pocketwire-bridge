@@ -62,11 +62,6 @@ impl Req {
         }
         self.query(key).to_string()
     }
-
-    /// The bearer token from the Authorization header.
-    pub fn bearer(&self) -> Option<&str> {
-        self.header("authorization").strip_prefix("Bearer ")
-    }
 }
 
 pub struct Resp {

@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// Unknown fields are ignored, so config files from earlier versions (with settings for features
+/// that have since been removed) still load; saving the config drops them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -16,26 +18,7 @@ pub struct Config {
     pub driver: String,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub driver_options: BTreeMap<String, String>,
-
-    // Private local MCP endpoint. None of these ever leave this computer.
-    /// Hex; keys the recipient tags the server sees.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub tag_key: String,
-    /// Bearer token for http://127.0.0.1:<port>/mcp.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub local_token: String,
-    #[serde(skip_serializing_if = "is_zero")]
-    pub local_port: u16,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub no_open_approvals: bool,
 }
-
-fn is_zero(n: &u16) -> bool {
-    *n == 0
-}
-
-/// Where the private MCP endpoint listens on 127.0.0.1.
-pub const DEFAULT_LOCAL_PORT: u16 = 47300;
 
 pub const NOT_PAIRED: &str = "this computer is not paired yet: run `pocketwire pair <code>` first";
 
@@ -57,26 +40,6 @@ impl std::fmt::Display for LoadError {
 impl From<LoadError> for String {
     fn from(e: LoadError) -> String {
         e.to_string()
-    }
-}
-
-impl Config {
-    /// Fills in the local endpoint's secrets and port; reports whether anything changed.
-    pub fn ensure_local(&mut self) -> bool {
-        let mut changed = false;
-        if self.tag_key.is_empty() {
-            self.tag_key = crate::util::random_hex(32);
-            changed = true;
-        }
-        if self.local_token.is_empty() {
-            self.local_token = format!("pwl_{}", crate::util::random_hex(24));
-            changed = true;
-        }
-        if self.local_port == 0 {
-            self.local_port = DEFAULT_LOCAL_PORT;
-            changed = true;
-        }
-        changed
     }
 }
 
@@ -106,7 +69,7 @@ pub fn default_path() -> Result<PathBuf, String> {
     Ok(user_config_dir()?.join("pocketwire").join("config.json"))
 }
 
-/// A file next to the config (messages.json, phones.json, panel.key, certs/).
+/// A file next to the config (panel.key, bridge.log).
 pub fn sibling(config: &Path, name: &str) -> PathBuf {
     config.parent().unwrap_or(Path::new(".")).join(name)
 }
@@ -181,16 +144,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pw-cfg-{}", crate::util::random_hex(4)));
         let p = dir.join("config.json");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(&p, r#"{"server":"https://pocketwire.app","device_id":"dev_1","account_id":"acc","name":"Laptop","private_key_pem":"x","driver":"kdeconnect","driver_options":{"device":"abc"},"local_port":47300}"#).unwrap();
-        let mut c = load(&p).unwrap();
+        std::fs::write(&p, r#"{"server":"https://pocketwire.app","device_id":"dev_1","account_id":"acc","name":"Laptop","private_key_pem":"x","driver":"kdeconnect","driver_options":{"device":"abc"}}"#).unwrap();
+        let c = load(&p).unwrap();
         assert_eq!(c.driver_options.get("device").map(String::as_str), Some("abc"));
-        assert!(c.ensure_local());
-        assert!(c.local_token.starts_with("pwl_") && c.local_token.len() == 52);
-        assert_eq!(c.tag_key.len(), 64);
-        assert!(!c.ensure_local());
+        assert_eq!((c.device_id.as_str(), c.account_id.as_str(), c.name.as_str()), ("dev_1", "acc", "Laptop"));
         save(&p, &c).unwrap();
         let again = load(&p).unwrap();
-        assert_eq!(again.local_token, c.local_token);
+        assert_eq!(again.driver, "kdeconnect");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -198,6 +158,29 @@ mod tests {
         }
         remove(&p).unwrap();
         assert!(matches!(load(&p), Err(LoadError::NotPaired)));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn loads_configs_with_fields_of_removed_features() {
+        let dir = std::env::temp_dir().join(format!("pw-cfg-{}", crate::util::random_hex(4)));
+        let p = dir.join("config.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        // As written by 0.3.0, with the settings of the private local endpoint.
+        std::fs::write(
+            &p,
+            r#"{"server":"https://pocketwire.app","device_id":"dev_1","account_id":"acc","name":"Laptop","private_key_pem":"x","driver":"macos-messages","driver_options":{"service":"sms"},"tag_key":"00ff","local_token":"pwl_abc","local_port":47302,"no_open_approvals":true,"relay_hostname":"x.example"}"#,
+        )
+        .unwrap();
+        let c = load(&p).unwrap();
+        assert_eq!((c.device_id.as_str(), c.driver.as_str()), ("dev_1", "macos-messages"));
+        assert_eq!(c.driver_options.get("service").map(String::as_str), Some("sms"));
+        save(&p, &c).unwrap();
+        let saved = std::fs::read_to_string(&p).unwrap();
+        for gone in ["tag_key", "local_token", "local_port", "no_open_approvals", "relay_hostname"] {
+            assert!(!saved.contains(gone), "{gone} still saved");
+        }
+        assert_eq!(load(&p).unwrap().private_key_pem, "x");
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

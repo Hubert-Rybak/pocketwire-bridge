@@ -47,10 +47,6 @@ async fn route(a: &Arc<App>, r: &Req) -> Resp {
             if !s.detail.is_empty() {
                 v["detail"] = json!(s.detail);
             }
-            let p = private_mcp(&s.private_url);
-            if !p.is_empty() {
-                v["private_url"] = json!(p);
-            }
             Resp::json(200, &v)
         }
         ("POST", p @ ("/pair" | "/unpair" | "/autostart" | "/retry")) => {
@@ -79,14 +75,6 @@ async fn route(a: &Arc<App>, r: &Req) -> Resp {
     }
 }
 
-fn private_mcp(u: &str) -> String {
-    if u.is_empty() {
-        String::new()
-    } else {
-        format!("{}/mcp", u.trim_end_matches('/'))
-    }
-}
-
 const STYLE: &str = r#":root{--bg:#f6f7f8;--card:#fff;--text:#14191d;--muted:#5d6872;--line:#e2e6ea;--accent:#16a34a;--warn:#b45309;--bad:#b91c1c}
 @media (prefers-color-scheme:dark){:root{--bg:#0f1418;--card:#171f25;--text:#e8edf1;--muted:#97a3ad;--line:#26313a;--accent:#22c55e;--warn:#f59e0b;--bad:#f87171}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
@@ -107,8 +95,8 @@ fn page(a: &App, error: &str) -> Resp {
     let csrf = esc(&a.csrf());
     let code = s.state as u8;
     let paired = s.state != State::NotPaired;
-    let pmcp = private_mcp(&s.private_url);
-    let dashboard = format!("{}/app", a.server.trim_end_matches('/'));
+    let dashboard = a.dashboard_url("");
+    let mcp = format!("{}/mcp", a.server.trim_end_matches('/'));
     let hidden = format!(r#"<input type="hidden" name="csrf" value="{csrf}">"#);
     let mut h = String::with_capacity(8192);
     h.push_str("<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n<title>Pocketwire Bridge</title>\n<style>\n");
@@ -153,33 +141,21 @@ fn page(a: &App, error: &str) -> Resp {
             host = esc(&hostname()),
         ));
     } else {
-        let open = if s.approval_url.is_empty() {
-            String::new()
-        } else {
-            format!(r#"<a class="btn primary" href="{}" target="_blank" rel="noopener">Open approvals</a>"#, esc(&s.approval_url))
-        };
-        let private = if pmcp.is_empty() {
-            r#"<span class="muted">Appears here once the Bridge is connected.</span>"#.to_string()
-        } else {
-            format!("Add <code>{}</code> as the connector URL in Claude or another AI app.", esc(&pmcp))
-        };
         let drv = match &s.driver_err {
             Some(e) => format!(r#" <span style="color:var(--warn)">({})</span>"#, esc(e)),
             None => " (ready)".into(),
         };
         h.push_str(&format!(
             r#"<div class="card">
-<h2>Approvals</h2>
-<p>Texts from AI apps wait for your OK here. The Bridge opens this page when one arrives.</p>
-{open}
+<h2>Connect your AI apps</h2>
+<p>Add <code>{mcp}</code> as a custom connector (a remote MCP server) in each AI app. The app asks you to sign in to Pocketwire once.</p>
+<p class="muted">Pocketwire keeps the texts your AI apps send, queues them for up to 24 hours while this computer or your phone is offline, and this Bridge delivers them. Approvals and history are in the dashboard.</p>
+<a class="btn primary" href="{dash}/approvals" target="_blank" rel="noopener">Open approvals</a>
 <a class="btn" href="{dash}" target="_blank" rel="noopener">Open the dashboard</a>
-</div>
-<div class="card">
-<h2>Private address for AI apps</h2>
-<p id="private">{private}</p>
 <p class="muted">Sending through: {name}{drv}</p>
 </div>
 "#,
+            mcp = esc(&mcp),
             dash = esc(&dashboard),
             name = esc(&s.driver_name),
         ));
@@ -206,13 +182,12 @@ fn page(a: &App, error: &str) -> Resp {
 <script>
 var last={code};
 setInterval(function(){{fetch('/status.json').then(function(r){{return r.json()}}).then(function(s){{
- if((s.code===0)!==(last===0)||(!!s.private_url)!=={has_private}){{location.replace('/');return}}
+ if((s.code===0)!==(last===0)){{location.replace('/');return}}
  document.getElementById('state').textContent=s.state;document.getElementById('detail').textContent=s.detail||'';
  document.getElementById('status').className='card s'+s.code;last=s.code;
 }}).catch(function(){{}})}},2000);
 </script>
-</body></html>"#,
-        has_private = !pmcp.is_empty(),
+</body></html>"#
     ));
     Resp::html(h)
 }

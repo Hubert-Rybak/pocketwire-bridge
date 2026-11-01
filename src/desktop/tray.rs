@@ -21,7 +21,7 @@ enum Action {
 fn act(app: &Arc<App>, a: Action) {
     match a {
         Action::Open => app.open(&app.panel_url()),
-        Action::Approvals => app.open(&app.snapshot().approval_url),
+        Action::Approvals => app.open(&app.dashboard_url("/approvals")),
         Action::Autostart => {
             let on = !app.snapshot().autostart;
             if let Err(e) = app.set_autostart(on) {
@@ -81,7 +81,7 @@ mod imp {
         let icon = |on: bool| Icon::from_rgba((if on { ICON_ON } else { ICON_OFF }).to_vec(), ICON_SIZE, ICON_SIZE).ok();
         let status = MenuItem::new("Starting…", false, None);
         let open = MenuItem::new("Open Pocketwire Bridge", true, None);
-        let approvals = MenuItem::new("Open approvals", false, None);
+        let approvals = MenuItem::new("Open approvals in the dashboard", false, None);
         let auto = CheckMenuItem::new("Start when I sign in", true, false, None);
         let logs = MenuItem::new("Show log", true, None);
         let exit = MenuItem::new("Quit", true, None);
@@ -103,7 +103,7 @@ mod imp {
         let refresh = |tray: &Option<tray_icon::TrayIcon>| {
             let s = app.snapshot();
             status.set_text(s.state.label());
-            approvals.set_enabled(!s.approval_url.is_empty());
+            approvals.set_enabled(s.state != State::NotPaired);
             auto.set_checked(s.autostart);
             if let Some(t) = tray {
                 let _ = t.set_icon(icon(s.state == State::Connected));
@@ -177,7 +177,7 @@ mod imp {
                 StandardItem { label: s.state.label().into(), enabled: false, ..Default::default() }.into(),
                 MenuItem::Separator,
                 item("Open Pocketwire Bridge", true, Action::Open),
-                item("Open approvals", !s.approval_url.is_empty(), Action::Approvals),
+                item("Open approvals in the dashboard", s.state != State::NotPaired, Action::Approvals),
                 MenuItem::Separator,
                 CheckmarkItem {
                     label: "Start when I sign in".into(),

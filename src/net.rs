@@ -222,7 +222,6 @@ pub async fn connect(u: &Url) -> Result<Stream, String> {
 
 pub struct Response {
     pub status: u16,
-    pub headers: hyper::HeaderMap,
     pub body: Bytes,
 }
 
@@ -245,7 +244,7 @@ pub async fn request(method: &str, url: &str, headers: &[(&str, String)], body: 
         .map_err(|e| e.to_string())?;
     let (parts, incoming) = res.into_parts();
     let body = http_body_util::Limited::new(incoming, limit).collect().await.map_err(|e| e.to_string())?.to_bytes();
-    Ok(Response { status: parts.status.as_u16(), headers: parts.headers, body })
+    Ok(Response { status: parts.status.as_u16(), body })
 }
 
 pub type WebSocket = tokio_tungstenite::WebSocketStream<Stream>;

@@ -6,14 +6,11 @@ use ring::rand::SystemRandom;
 use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_ASN1_SIGNING};
 use serde::{Deserialize, Serialize};
 
-fn is_false(b: &bool) -> bool {
-    !*b
-}
 fn is_zero(n: &i64) -> bool {
     *n == 0
 }
 
-/// Any JSON frame; fields are optional depending on `type`.
+/// Any JSON frame; fields are optional depending on `type`, and unknown ones are ignored.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Frame {
@@ -47,37 +44,6 @@ pub struct Frame {
     pub code: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub message: String,
-
-    // Private messages (local MCP): the Bridge asks the server for a decision without revealing
-    // the number or the text.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub request_id: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub to_tag: String,
-    #[serde(skip_serializing_if = "is_zero")]
-    pub body_len: i64,
-    #[serde(skip_serializing_if = "is_zero")]
-    pub segments: i64,
-    #[serde(skip_serializing_if = "is_false")]
-    pub trusted: bool,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub client_name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ok: Option<bool>,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub message_id: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub numbers: Vec<String>,
-
-    // Blind relay: the Bridge checks a bearer token by its hash.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub token_hash: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub active: Option<bool>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub scopes: Vec<String>,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub hostname: String,
 }
 
 impl Frame {
@@ -96,11 +62,6 @@ pub struct CommandParams {
 /// The exact message a device signs in reply to a challenge.
 pub fn challenge_string(nonce: &str, device_id: &str) -> String {
     format!("pocketwire-v1|{nonce}|{device_id}")
-}
-
-/// What a Bridge signs to open its blind-relay tunnel.
-pub fn tunnel_challenge_string(nonce: &str, device_id: &str) -> String {
-    format!("pocketwire-tunnel-v1|{nonce}|{device_id}")
 }
 
 /// The device's EC P-256 key. Only the public key ever leaves this computer.
@@ -207,41 +168,6 @@ pub fn normalize_pairing_code(s: &str) -> String {
         .collect()
 }
 
-/// Strips spaces, dots, dashes and brackets and turns a leading 00 into +, like the server.
-pub fn normalize_phone(s: &str) -> String {
-    let s: String = s.trim().chars().filter(|c| !matches!(c, ' ' | '(' | ')' | '.' | '-' | '\t')).collect();
-    match s.strip_prefix("00") {
-        Some(rest) => format!("+{rest}"),
-        None => s,
-    }
-}
-
-/// GSM 03.38 basic set plus the extension table, as the server counts it.
-const GSM7: &str =
-    "\n\r !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_abcdefghijklmnopqrstuvwxyz{|}~£¥èéùìòÇØøÅåΔΦΓΛΩΠΨΣΘΞÆæßÉ¤¡ÄÖÑÜ§¿äöñüà€";
-
-/// How many SMS a text needs (GSM-7: 160/153, otherwise UCS-2: 70/67).
-pub fn segments(body: &str) -> i64 {
-    let n = body.chars().count() as i64;
-    if body.chars().all(|c| GSM7.contains(c)) {
-        if n <= 160 {
-            1
-        } else {
-            (n + 152) / 153
-        }
-    } else if n <= 70 {
-        1
-    } else {
-        (n + 66) / 67
-    }
-}
-
-/// The keyed tag the server sees instead of a phone number. The key never leaves the Bridge,
-/// so the server can tell repeat recipients apart but not who they are.
-pub fn recipient_tag(key: &[u8], to: &str) -> String {
-    crate::util::hmac_hex(key, format!("pocketwire-recipient-v1|{to}").as_bytes())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,19 +207,6 @@ mod tests {
         assert!(validate_params(Some(&CommandParams { body: "   ".into(), ..ok.clone() })).is_err());
         assert!(validate_params(Some(&CommandParams { body: "x".repeat(1601), ..ok.clone() })).is_err());
         assert!(validate_params(None).is_err());
-        assert_eq!(normalize_phone(" 0048 (501) 234-567 "), "+48501234567");
         assert_eq!(normalize_pairing_code("k7q2-m9xd il o"), "K7Q2M9XD110");
-    }
-
-    #[test]
-    fn segments_and_tags() {
-        assert_eq!(segments("hi"), 1);
-        assert_eq!(segments(&"a".repeat(160)), 1);
-        assert_eq!(segments(&"a".repeat(161)), 2);
-        assert_eq!(segments("€uro [x]"), 1);
-        assert_eq!(segments(&"ż".repeat(70)), 1);
-        assert_eq!(segments(&"ż".repeat(71)), 2);
-        // Same value as the Go Bridge, so the server keeps seeing the same tags after an upgrade.
-        assert_eq!(recipient_tag(b"k", "+48501234567"), "fd6f94341ed40a4f2630350b9c8c24c64fca4bde99934cba6e6373b90e6a25ef");
     }
 }
