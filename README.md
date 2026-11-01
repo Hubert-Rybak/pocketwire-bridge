@@ -14,7 +14,7 @@ This repository is the whole Bridge, under the Apache 2.0 license. Every release
 |---|---|
 | macOS | `brew install --cask hubert-rybak/pocketwire/pocketwire-bridge` installs *Pocketwire Bridge.app* (menu bar icon) and the `pocketwire` command. |
 | macOS, Linux from source | `brew install hubert-rybak/pocketwire/pocketwire` builds this repository with Cargo. Use the cask or the formula, not both. |
-| Windows | `pocketwire-setup-windows-amd64.exe` (or `-arm64`) from the [latest release](https://github.com/Hubert-Rybak/pocketwire-bridge/releases/latest). It needs no administrator rights, adds the Bridge to the Start menu and the tray, and can start it when you sign in. |
+| Windows | `winget install Pocketwire.Bridge` (once the package is listed in winget), or `pocketwire-setup-windows-amd64.exe` (or `-arm64`) from the [latest release](https://github.com/Hubert-Rybak/pocketwire-bridge/releases/latest). It needs no administrator rights, adds the Bridge to the Start menu and the tray, and can start it when you sign in. |
 | Linux | `pocketwire-linux-amd64` or `-arm64` from the latest release: a static binary that runs on any distribution. |
 
 Then pair the computer with a code from **Devices** in the [dashboard](https://pocketwire.app/app/devices):

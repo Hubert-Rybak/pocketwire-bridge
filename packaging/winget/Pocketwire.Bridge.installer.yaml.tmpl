@@ -1,0 +1,28 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.9.0.schema.json
+PackageIdentifier: Pocketwire.Bridge
+PackageVersion: @VERSION@
+InstallerLocale: en-US
+InstallerType: nullsoft
+Scope: user
+InstallModes:
+  - interactive
+  - silent
+  - silentWithProgress
+UpgradeBehavior: install
+Commands:
+  - pocketwire
+ProductCode: PocketwireBridge
+ReleaseDate: @DATE@
+AppsAndFeaturesEntries:
+  - DisplayName: Pocketwire Bridge
+    Publisher: Pocketwire
+    ProductCode: PocketwireBridge
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/Hubert-Rybak/pocketwire-bridge/releases/download/v@VERSION@/pocketwire-setup-windows-amd64.exe
+    InstallerSha256: @SHA_AMD64@
+  - Architecture: arm64
+    InstallerUrl: https://github.com/Hubert-Rybak/pocketwire-bridge/releases/download/v@VERSION@/pocketwire-setup-windows-arm64.exe
+    InstallerSha256: @SHA_ARM64@
+ManifestType: installer
+ManifestVersion: 1.9.0

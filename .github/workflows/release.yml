@@ -10,6 +10,11 @@ name: release
 # The tap step needs the repository secret TAP_TOKEN: a fine-grained token with
 # Contents: read and write on Hubert-Rybak/homebrew-pocketwire. Without it the release is
 # still published and the tap is left as it is.
+#
+# Every release also carries winget-manifests.zip. Once Pocketwire.Bridge is in
+# microsoft/winget-pkgs (the first version is submitted by hand, see packaging/winget/README.md),
+# the winget job sends each new version there itself, given the secret WINGET_TOKEN: a classic
+# token with the public_repo scope from the account that owns the winget-pkgs fork.
 on:
   push:
     tags: ["v*"]
@@ -186,11 +191,24 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          path: src
       - uses: actions/download-artifact@v4
         with:
           pattern: release-*
           path: dist
           merge-multiple: true
+      - name: Winget manifests
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          amd64=$(sha256sum dist/pocketwire-setup-windows-amd64.exe | cut -d' ' -f1)
+          arm64=$(sha256sum dist/pocketwire-setup-windows-arm64.exe | cut -d' ' -f1)
+          src/packaging/winget/render.sh "$VERSION" "$amd64" "$arm64" winget
+          (cd winget && zip -qr ../dist/winget-manifests.zip manifests)
+          unzip -l dist/winget-manifests.zip
       - name: Checksums
         run: |
           cd dist
@@ -212,7 +230,7 @@ jobs:
           [release workflow](https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID).
 
           - macOS: \`brew install --cask hubert-rybak/pocketwire/pocketwire-bridge\`, or Pocketwire-Bridge-macos.zip (menu bar app, Apple silicon and Intel)
-          - Windows: pocketwire-setup-windows-amd64.exe or -arm64.exe (installer, no administrator rights)
+          - Windows: \`winget install Pocketwire.Bridge\`, or pocketwire-setup-windows-amd64.exe or -arm64.exe (installer, no administrator rights). winget-manifests.zip holds this version's manifests for winget-pkgs.
           - Linux: pocketwire-linux-amd64 or -arm64 (static), or \`brew install hubert-rybak/pocketwire/pocketwire\` to build from source
 
           Check a download:
@@ -258,3 +276,33 @@ jobs:
           git diff --cached --quiet && { echo "tap already up to date"; exit 0; }
           git commit -m "pocketwire-bridge $VERSION"
           git push origin HEAD
+
+  winget:
+    needs: [version, publish]
+    runs-on: ubuntu-latest
+    env:
+      WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+    steps:
+      - name: Winget not configured
+        if: env.WINGET_TOKEN == ''
+        run: echo "WINGET_TOKEN is not set; the release is published, winget was not updated." >> "$GITHUB_STEP_SUMMARY"
+      - id: listed
+        name: Check that Pocketwire.Bridge is already in winget-pkgs
+        if: env.WINGET_TOKEN != ''
+        run: |
+          if curl -fsS -o /dev/null -H "Authorization: Bearer $WINGET_TOKEN" \
+              https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/p/Pocketwire/Bridge; then
+            echo "listed=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "listed=no" >> "$GITHUB_OUTPUT"
+            echo "Pocketwire.Bridge is not in winget-pkgs yet: submit winget-manifests.zip from this release once with wingetcreate (see packaging/winget/README.md). Later releases are sent automatically." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Send this version to winget-pkgs
+        if: steps.listed.outputs.listed == 'yes'
+        uses: vedantmgoyal9/winget-releaser@main
+        with:
+          identifier: Pocketwire.Bridge
+          version: ${{ needs.version.outputs.version }}
+          release-tag: ${{ env.TAG }}
+          installers-regex: 'pocketwire-setup-windows-(amd64|arm64)\.exe$'
+          token: ${{ secrets.WINGET_TOKEN }}

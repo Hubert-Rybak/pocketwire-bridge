@@ -55,10 +55,22 @@ VIAddVersionKey "LegalCopyright" "Pocketwire"
 Function .onInit
 !if "${ARCH}" == "amd64"
   ${IfNot} ${RunningX64}
-    MessageBox MB_ICONSTOP "This installer is for 64-bit Windows."
+    MessageBox MB_ICONSTOP "This installer is for 64-bit Windows." /SD IDOK
     Abort
   ${EndIf}
 !endif
+FunctionEnd
+
+; A silent install (winget, or an update) has no finish page, so start the Bridge here: in the
+; background when this computer is already paired, otherwise with its page open for pairing.
+Function .onInstSuccess
+  ${If} ${Silent}
+    ${If} ${FileExists} "$APPDATA\pocketwire\config.json"
+      Exec '"$INSTDIR\${GUI}" --background'
+    ${Else}
+      Exec '"$INSTDIR\${GUI}"'
+    ${EndIf}
+  ${EndIf}
 FunctionEnd
 
 ; Stop a running copy so its files can be replaced.
