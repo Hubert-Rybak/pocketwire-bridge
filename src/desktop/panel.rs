@@ -14,18 +14,35 @@ const CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; script-src 'un
 /// Accepts only loopback host names (DNS rebinding), same-origin posts and requests that carry
 /// the page's key (in the address once, then in a cookie).
 pub async fn handle(a: &Arc<App>, r: Req) -> Resp {
-    let resp = route(a, &r).await;
-    resp.with("x-frame-options", "DENY").with("cache-control", "no-store").with("referrer-policy", "no-referrer").with("content-security-policy", CSP)
+    secure(route(a, &r).await)
+}
+
+/// Headers sent with every answer of the page.
+///
+/// The referrer policy must keep the page's own origin on same-origin requests: under
+/// `no-referrer` browsers (Safari, Firefox) send `Origin: null` with the page's own form posts,
+/// which `origin_ok` then refuses. `same-origin` still sends nothing to other sites.
+fn secure(resp: Resp) -> Resp {
+    resp.with("x-frame-options", "DENY").with("cache-control", "no-store").with("referrer-policy", "same-origin").with("content-security-policy", CSP)
+}
+
+/// Whether the Host header names this computer (loopback only, against DNS rebinding).
+fn host_ok(host: &str) -> bool {
+    let name = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host);
+    name == "127.0.0.1" || name == "localhost"
+}
+
+/// Whether the Origin header, when sent, is this page itself. `null` (sandboxed frames, opaque
+/// origins) and every other site are refused.
+fn origin_ok(origin: &str) -> bool {
+    origin.is_empty() || origin == format!("http://127.0.0.1:{PANEL_PORT}") || origin == format!("http://localhost:{PANEL_PORT}")
 }
 
 async fn route(a: &Arc<App>, r: &Req) -> Resp {
-    let host = r.header("host");
-    let name = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host);
-    if name != "127.0.0.1" && name != "localhost" {
+    if !host_ok(r.header("host")) {
         return Resp::error(403, "forbidden host");
     }
-    let o = r.header("origin");
-    if !o.is_empty() && o != format!("http://127.0.0.1:{PANEL_PORT}") && o != format!("http://localhost:{PANEL_PORT}") {
+    if !origin_ok(r.header("origin")) {
         return Resp::error(403, "forbidden origin");
     }
     let k = r.query("k");
@@ -190,4 +207,40 @@ setInterval(function(){{fetch('/status.json').then(function(r){{return r.json()}
 </body></html>"#
     ));
     Resp::html(h)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_only_loopback_hosts() {
+        assert!(host_ok("127.0.0.1:47301"));
+        assert!(host_ok("localhost:47301"));
+        assert!(host_ok("127.0.0.1"));
+        assert!(!host_ok("evil.example:47301"));
+        assert!(!host_ok("127.0.0.1.evil.example:47301"));
+        assert!(!host_ok(""));
+    }
+
+    #[test]
+    fn accepts_only_the_page_itself_as_origin() {
+        assert!(origin_ok(""));
+        assert!(origin_ok("http://127.0.0.1:47301"));
+        assert!(origin_ok("http://localhost:47301"));
+        assert!(!origin_ok("null"));
+        assert!(!origin_ok("https://pocketwire.app"));
+        assert!(!origin_ok("http://127.0.0.1:47302"));
+        assert!(!origin_ok("https://127.0.0.1:47301"));
+        assert!(!origin_ok("http://127.0.0.1:47301.evil.example"));
+    }
+
+    #[test]
+    fn referrer_policy_keeps_origin_on_own_posts() {
+        // Under `no-referrer` Safari and Firefox send `Origin: null` with the page's own form
+        // posts, and pairing fails with "forbidden origin".
+        let r = secure(Resp::new(200));
+        let policy = r.headers.iter().find(|(n, _)| *n == "referrer-policy").map(|(_, v)| v.as_str());
+        assert_eq!(policy, Some("same-origin"));
+    }
 }
