@@ -79,9 +79,20 @@ async fn bind_lock() -> Result<TcpListener, String> {
 /// Starts the device connection; it runs until `stop` fires or the device is revoked.
 pub async fn start(c: &Config, stop: CancellationToken) -> Result<Running, String> {
     let d = Driver::new(&c.driver, &c.driver_options, None)?;
+    start_with(c, d, stop).await
+}
+
+async fn start_with(c: &Config, d: Driver, stop: CancellationToken) -> Result<Running, String> {
     let key = Arc::new(DeviceKey::from_pem(&c.private_key_pem)?);
-    if let Err(e) = d.check().await {
-        logf!("warning: driver {} is not ready: {e}", d.name());
+    // The phone check runs on the side: on a Mac it can wait for the Automation prompt, and the
+    // connection to Pocketwire must not wait for it.
+    {
+        let d = d.clone();
+        tokio::spawn(async move {
+            if let Err(e) = d.check_within(crate::driver::CHECK_TIMEOUT).await {
+                logf!("warning: driver {} is not ready: {e}", d.name());
+            }
+        });
     }
     let r = Runner::new(&c.server, &c.device_id, key, d.clone());
 
@@ -107,4 +118,29 @@ pub async fn start(c: &Config, stop: CancellationToken) -> Result<Running, Strin
         let _ = done_tx.send(res);
     });
     Ok(Running { runner: r, driver: d, done })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::driver::{tests::hanging, Kind};
+
+    #[tokio::test]
+    async fn starts_without_waiting_for_the_phone_check() {
+        let key = DeviceKey::generate().unwrap();
+        let c = Config {
+            server: "http://127.0.0.1:9".into(),
+            device_id: "dev".into(),
+            account_id: "acc".into(),
+            name: "test".into(),
+            private_key_pem: key.to_pem(),
+            driver: "macos-messages".into(),
+            driver_options: Default::default(),
+        };
+        let d = Driver::for_test(Kind::MacMessages { service: String::new() }, hanging(), "macos", None);
+        let stop = CancellationToken::new();
+        let started = tokio::time::timeout(std::time::Duration::from_secs(5), start_with(&c, d, stop.clone())).await;
+        stop.cancel();
+        assert!(matches!(started, Ok(Ok(_))), "start waited for the driver check");
+    }
 }

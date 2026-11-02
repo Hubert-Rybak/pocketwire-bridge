@@ -248,12 +248,7 @@ impl App {
     }
 
     async fn check_driver(&self, d: Driver) {
-        let err = match tokio::time::timeout(Duration::from_secs(15), d.check()).await {
-            Ok(Ok(())) => None,
-            Ok(Err(e)) => Some(e),
-            Err(_) => Some("the check timed out".into()),
-        };
-        self.lock().driver_err = err;
+        self.lock().driver_err = d.check_within(crate::driver::CHECK_TIMEOUT).await.err();
     }
 
     /// Whether a Bridge outside this app already answers on its marker port.

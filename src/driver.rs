@@ -4,6 +4,7 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
@@ -13,6 +14,10 @@ pub type Runner = Arc<dyn Fn(String, Vec<String>) -> BoxFuture<Result<Vec<u8>, S
 pub const NAMES: [&str; 3] = ["dry-run", "kdeconnect", "macos-messages"];
 
 pub const UNSUPPORTED: &str = "not supported on this operating system";
+
+/// How long a readiness check may take. On a Mac the first check waits for the user to answer
+/// macOS's "wants to control Messages" prompt, which can take forever.
+pub const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Keeps console programs (kdeconnect-cli) from flashing a window when the windowless app starts them.
 pub fn hide_window(_cmd: &mut tokio::process::Command) {
@@ -109,6 +114,9 @@ pub const MAC_SEND_SCRIPT: &str = r#"on run argv
 	end tell
 end run"#;
 
+const MAC_AUTOMATION_HINT: &str =
+    "allow Pocketwire Bridge, or the terminal you run it from, to control Messages in System Settings → Privacy & Security → Automation";
+
 const MAC_CHECK_SCRIPT: &str = r#"tell application "Messages" to get name of every account"#;
 
 /// The most likely driver for this OS.
@@ -133,7 +141,7 @@ impl Driver {
     }
 
     #[cfg(test)]
-    fn for_test(kind: Kind, run: Runner, os: &'static str, kde_bin: Option<&str>) -> Driver {
+    pub(crate) fn for_test(kind: Kind, run: Runner, os: &'static str, kde_bin: Option<&str>) -> Driver {
         Driver { kind, run, os, kde_bin: kde_bin.map(str::to_string) }
     }
 
@@ -184,12 +192,25 @@ impl Driver {
                 (self.run)("/usr/bin/osascript".into(), vec!["-e".into(), MAC_CHECK_SCRIPT.into()])
                     .await
                     .map(|_| ())
-                    .map_err(|e| format!("cannot talk to Messages.app (allow Automation for your terminal in System Settings → Privacy & Security): {e}"))
+                    .map_err(|e| format!("cannot talk to Messages.app ({MAC_AUTOMATION_HINT}): {e}"))
             }
             Kind::KdeConnect { device } => {
                 let bin = self.kde()?;
                 self.kde_device(&bin, device).await.map(|_| ())
             }
+        }
+    }
+
+    /// `check`, given at most `limit` to answer.
+    pub async fn check_within(&self, limit: Duration) -> Result<(), String> {
+        match tokio::time::timeout(limit, self.check()).await {
+            Ok(r) => r,
+            Err(_) => Err(match self.kind {
+                Kind::MacMessages { .. } => {
+                    format!("Messages.app did not answer; if macOS asks whether Pocketwire Bridge may control Messages, click OK ({MAC_AUTOMATION_HINT})")
+                }
+                _ => "the check timed out".to_string(),
+            }),
         }
     }
 
@@ -225,7 +246,7 @@ impl Driver {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::Mutex;
 
@@ -272,6 +293,18 @@ mod tests {
         let (_, run) = recorder("\n");
         let d = Driver::for_test(Kind::KdeConnect { device: String::new() }, run, "linux", Some("kdeconnect-cli"));
         assert!(d.check().await.unwrap_err().contains("no reachable"));
+    }
+
+    /// A program that never answers, like osascript while macOS shows its Automation prompt.
+    pub(crate) fn hanging() -> Runner {
+        Arc::new(|_, _| Box::pin(std::future::pending()))
+    }
+
+    #[tokio::test]
+    async fn check_gives_up_on_a_silent_messages_app() {
+        let d = Driver::for_test(Kind::MacMessages { service: String::new() }, hanging(), "macos", None);
+        let e = d.check_within(Duration::from_millis(50)).await.unwrap_err();
+        assert!(e.contains("Automation"), "{e}");
     }
 
     #[test]

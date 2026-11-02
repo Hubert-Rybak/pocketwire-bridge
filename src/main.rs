@@ -305,7 +305,7 @@ async fn cmd_doctor() -> Result<(), String> {
     for n in driver::NAMES {
         let opts = c.as_ref().filter(|c| c.driver == n).map(|c| c.driver_options.clone()).unwrap_or_default();
         let res = match driver::Driver::new(n, &opts, None) {
-            Ok(d) => tokio::time::timeout(Duration::from_secs(10), d.check()).await.unwrap_or_else(|_| Err("context deadline exceeded".into())),
+            Ok(d) => d.check_within(Duration::from_secs(10)).await,
             Err(e) => Err(e),
         };
         match res {
