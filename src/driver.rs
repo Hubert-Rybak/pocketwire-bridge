@@ -423,6 +423,19 @@ pub(crate) mod tests {
         assert!(e.starts_with("cannot talk to Messages.app") && !e.contains("Automation"), "{e}");
     }
 
+    /// On a Mac (CI runs macOS too) both scripts must compile against Messages' own dictionary.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_scripts_compile_against_messages() {
+        let dir = std::env::temp_dir();
+        for (i, script) in [MAC_CHECK_SCRIPT, MAC_SEND_SCRIPT].iter().enumerate() {
+            let out = dir.join(format!("pocketwire-check-{}-{i}.scpt", std::process::id()));
+            let res = std::process::Command::new("/usr/bin/osacompile").arg("-o").arg(&out).arg("-e").arg(script).output().unwrap();
+            let _ = std::fs::remove_file(&out);
+            assert!(res.status.success(), "{}", String::from_utf8_lossy(&res.stderr));
+        }
+    }
+
     #[test]
     fn unknown_driver() {
         assert!(Driver::new("phone-link", &Default::default(), None).is_err());
