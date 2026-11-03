@@ -75,7 +75,7 @@ pocketwire version
 
 | Driver | OS | Needs |
 |---|---|---|
-| `macos-messages` | macOS (default) | Messages signed in; for real SMS an iPhone with *Settings, Messages, Text Message Forwarding* on for this Mac. The first text asks for Automation permission. `--messages-service imessage` sends iMessages. |
+| `macos-messages` | macOS (default) | Messages signed in; for real SMS an iPhone with *Settings, Apps, Messages, Text Message Forwarding* (*Settings, Messages* on iOS 17 and older) on for this Mac. On first start macOS asks whether Pocketwire Bridge may control Messages; click OK. `--messages-service imessage` sends iMessages. |
 | `kdeconnect` | Windows and Linux (default), macOS | KDE Connect paired with your Android phone, with the SMS permission granted in the KDE Connect app on the phone. `--kdeconnect-device <id>` picks a phone (`kdeconnect-cli -l`). |
 | `dry-run` | all | Nothing: it prints messages instead of sending them. |
 

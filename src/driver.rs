@@ -117,7 +117,48 @@ end run"#;
 const MAC_AUTOMATION_HINT: &str =
     "allow Pocketwire Bridge, or the terminal you run it from, to control Messages in System Settings → Privacy & Security → Automation";
 
-const MAC_CHECK_SCRIPT: &str = r#"tell application "Messages" to get name of every account"#;
+/// Asks Messages.app whether it has an enabled account of the wanted service. Messages' `account`
+/// class has no `name` property, so the check reads only `service type` and `enabled`, the same
+/// properties the send script relies on. It answers "ok", "missing" or "disabled".
+pub const MAC_CHECK_SCRIPT: &str = r#"on run argv
+	set wantService to item 1 of argv
+	tell application "Messages"
+		if wantService is "imessage" then
+			set found to every account whose service type = iMessage
+		else
+			set found to every account whose service type = SMS
+		end if
+		if (count of found) is 0 then return "missing"
+		repeat with theAccount in found
+			try
+				if enabled of theAccount then return "ok"
+			on error
+				return "ok"
+			end try
+		end repeat
+		return "disabled"
+	end tell
+end run"#;
+
+/// What to do when Messages.app has no account of the service.
+fn mac_missing(svc: &str) -> String {
+    if svc == "imessage" {
+        "no iMessage account in Messages.app: open Messages on this Mac and sign in with your Apple Account (Messages → Settings → iMessage)".into()
+    } else {
+        "no SMS account in Messages.app: on your iPhone turn on Settings → Apps → Messages → Text Message Forwarding (Settings → Messages on iOS 17 and older) for this Mac, and sign in to Messages on the Mac with the same Apple Account".into()
+    }
+}
+
+/// Turns an osascript failure into advice that matches what actually went wrong.
+fn mac_error(svc: &str, e: &str) -> String {
+    if e.contains("-1743") {
+        format!("macOS does not let Pocketwire Bridge control Messages ({MAC_AUTOMATION_HINT}): {e}")
+    } else if e.contains("-1728") {
+        format!("{}: {e}", mac_missing(svc))
+    } else {
+        format!("cannot talk to Messages.app: {e}")
+    }
+}
 
 /// The most likely driver for this OS.
 pub fn default_name() -> &'static str {
@@ -185,14 +226,23 @@ impl Driver {
     pub async fn check(&self) -> Result<(), String> {
         match &self.kind {
             Kind::DryRun => Ok(()),
-            Kind::MacMessages { .. } => {
+            Kind::MacMessages { service } => {
                 if self.os != "macos" {
                     return Err(UNSUPPORTED.into());
                 }
-                (self.run)("/usr/bin/osascript".into(), vec!["-e".into(), MAC_CHECK_SCRIPT.into()])
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| format!("cannot talk to Messages.app ({MAC_AUTOMATION_HINT}): {e}"))
+                let svc = Self::mac_service(service);
+                let args = vec!["-e".into(), MAC_CHECK_SCRIPT.into(), svc.into()];
+                let out = (self.run)("/usr/bin/osascript".into(), args).await.map_err(|e| mac_error(svc, &e))?;
+                match String::from_utf8_lossy(&out).trim() {
+                    "missing" => Err(mac_missing(svc)),
+                    "disabled" if svc == "imessage" => {
+                        Err("the iMessage account in Messages.app is turned off: turn it on in Messages → Settings → iMessage on this Mac".into())
+                    }
+                    "disabled" => {
+                        Err("the SMS account in Messages.app is turned off: on your iPhone turn on Text Message Forwarding for this Mac again".into())
+                    }
+                    _ => Ok(()),
+                }
             }
             Kind::KdeConnect { device } => {
                 let bin = self.kde()?;
@@ -226,13 +276,7 @@ impl Driver {
                 }
                 let svc = Self::mac_service(service);
                 let args = vec!["-e".into(), MAC_SEND_SCRIPT.into(), to.into(), body.into(), svc.into()];
-                (self.run)("/usr/bin/osascript".into(), args).await.map(|_| ()).map_err(|e| {
-                    if e.contains("-1728") {
-                        format!("no {svc} account in Messages.app (enable Text Message Forwarding on your iPhone for this Mac): {e}")
-                    } else {
-                        e
-                    }
-                })
+                (self.run)("/usr/bin/osascript".into(), args).await.map(|_| ()).map_err(|e| mac_error(svc, &e))
             }
             Kind::KdeConnect { device } => {
                 let bin = self.kde()?;
@@ -305,6 +349,78 @@ pub(crate) mod tests {
         let d = Driver::for_test(Kind::MacMessages { service: String::new() }, hanging(), "macos", None);
         let e = d.check_within(Duration::from_millis(50)).await.unwrap_err();
         assert!(e.contains("Automation"), "{e}");
+    }
+
+    fn answering(out: &'static str) -> (Calls, Runner) {
+        let calls: Calls = Arc::default();
+        let c = calls.clone();
+        let run: Runner = Arc::new(move |name, args| {
+            c.lock().unwrap().push((name, args));
+            Box::pin(async move { Ok(out.as_bytes().to_vec()) })
+        });
+        (calls, run)
+    }
+
+    fn failing(err: &'static str) -> Runner {
+        Arc::new(move |_, _| Box::pin(async move { Err(err.to_string()) }))
+    }
+
+    fn mac(service: &str, run: Runner) -> Driver {
+        Driver::for_test(Kind::MacMessages { service: service.into() }, run, "macos", None)
+    }
+
+    #[test]
+    fn mac_check_reads_only_properties_messages_has() {
+        // Messages' account class has no `name`; asking for it fails with -1728 on every Mac.
+        assert!(!MAC_CHECK_SCRIPT.contains("name of"), "{MAC_CHECK_SCRIPT}");
+        assert!(MAC_CHECK_SCRIPT.contains("service type = SMS"));
+        assert!(MAC_CHECK_SCRIPT.contains("service type = iMessage"));
+        assert!(MAC_CHECK_SCRIPT.contains("enabled of"));
+    }
+
+    #[tokio::test]
+    async fn mac_check_asks_for_the_configured_service() {
+        let (calls, run) = answering("ok\n");
+        mac("", run.clone()).check().await.unwrap();
+        mac("iMessage", run).check().await.unwrap();
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls[0].0, "/usr/bin/osascript");
+        assert_eq!(calls[0].1, ["-e".to_string(), MAC_CHECK_SCRIPT.to_string(), "sms".to_string()]);
+        assert_eq!(calls[1].1[2], "imessage");
+    }
+
+    #[tokio::test]
+    async fn mac_check_explains_a_missing_account() {
+        let (_, run) = answering("missing\n");
+        let e = mac("", run.clone()).check().await.unwrap_err();
+        assert!(e.contains("no SMS account") && e.contains("Text Message Forwarding"), "{e}");
+        assert!(!e.contains("Automation"), "{e}");
+        let e = mac("imessage", run).check().await.unwrap_err();
+        assert!(e.contains("no iMessage account") && e.contains("sign in"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn mac_check_explains_a_disabled_account() {
+        let (_, run) = answering("disabled");
+        let e = mac("", run).check().await.unwrap_err();
+        assert!(e.contains("turned off") && e.contains("Text Message Forwarding"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn mac_errors_name_the_real_cause() {
+        let denied = "osascript: exit status 1: execution error: Not authorized to send Apple events to Messages. (-1743)";
+        let e = mac("", failing(denied)).check().await.unwrap_err();
+        assert!(e.contains("Automation") && e.contains("-1743"), "{e}");
+
+        let none = "osascript: exit status 1: execution error: Messages got an error: Can’t get account 1 whose service type = SMS. (-1728)";
+        let e = mac("", failing(none)).check().await.unwrap_err();
+        assert!(e.contains("no SMS account") && !e.contains("Automation"), "{e}");
+        let e = mac("", failing(none)).send_sms("+1", "x").await.unwrap_err();
+        assert!(e.contains("no SMS account") && e.contains("-1728"), "{e}");
+
+        let other = "osascript: exit status 1: execution error: Messages got an error: Application isn’t running. (-600)";
+        let e = mac("", failing(other)).check().await.unwrap_err();
+        assert!(e.starts_with("cannot talk to Messages.app") && !e.contains("Automation"), "{e}");
     }
 
     #[test]
